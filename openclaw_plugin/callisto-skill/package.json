@@ -1,0 +1,10 @@
+{
+  "name": "openclaw-skill-callisto",
+  "version": "1.0.0",
+  "description": "CALLISTO security detection skill for OpenClaw",
+  "type": "module",
+  "main": "src/index.js",
+  "keywords": ["openclaw", "skill", "security", "callisto"],
+  "author": "CALLISTO Team",
+  "license": "MIT"
+}

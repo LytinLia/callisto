@@ -1,0 +1,15 @@
+{
+  "id": "callisto-plugin",
+  "name": "CALLISTO Security Plugin",
+  "version": "1.0.0",
+  "description": "实时检测并拦截 OpenClaw 中的危险操作",
+  "author": "CALLISTO Team",
+  "license": "MIT",
+  "extensions": ["./dist/index.js"],
+  "skills": ["./openclaw_plugin/callisto-skill"],
+  "configSchema": {},
+  "compat": {
+    "pluginApi": ">=2026.3.24-beta.2",
+    "minGatewayVersion": "2026.3.24-beta.2"
+  }
+}

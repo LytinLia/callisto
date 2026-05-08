@@ -1,0 +1,224 @@
+# CALLISTO OpenClaw Skill 适配指南
+
+**目标**: 将 CALLISTO 集成到 OpenClaw 作为 Skill 插件
+
+---
+
+## 目录结构
+
+```
+callisto-skill/
+├── SKILL.md              # OpenClaw Skill 定义（必需）
+├── package.json          # Node.js 包描述
+├── src/
+│   └── index.js          # Node.js 入口，调用 Python 后端
+├── python/
+│   └── callisto_agent.py # Python 检测引擎
+└── README.md             # 本文档
+```
+
+---
+
+## 与原集成示例的区别
+
+| 原文件 | OpenClaw 适配 | 修改说明 |
+|--------|--------------|---------|
+| `agent_with_callisto.py` | `python/callisto_agent.py` | 移除 Agent 框架，改为 CLI 调用模式 |
+| `interceptor_patch.py` | 不需要 | OpenClaw 工具调用通过 Skill 封装 |
+| `INTEGRATION_GUIDE.md` | `README.md` | 重写为 OpenClaw Skill 开发指南 |
+
+---
+
+## 核心修改点
+
+### 1. 移除 Python Agent 框架
+
+原版 `agent_with_callisto.py` 包含完整的 Python Agent 实现，但 OpenClaw 使用 Node.js 作为主运行时。
+
+**修改**:
+- 改为 Python CLI 工具
+- 通过 `spawn()` 被 Node.js 调用
+- 结果通过 JSON 返回
+
+### 2. 工具签名适配
+
+OpenClaw Skill 的工具需要符合特定签名：
+
+```javascript
+// OpenClaw Skill 工具
+export const tools = {
+  tool_name: async (args) => {
+    // args 包含会话 ID、参数等
+    return { status: 'ok', data: ... };
+  }
+};
+```
+
+### 3. 会话管理
+
+OpenClaw 管理会话状态，CALLISTO 作为无状态工具被调用：
+
+```python
+# Python 后端接收 session_id 参数
+def scan(self, session_id: str) -> ScanResult:
+    session = self.get_session(session_id)
+    # ...检测逻辑
+```
+
+### 4. 熔断通知
+
+由于 OpenClaw 在沙箱中运行工具，**无法直接阻断**，但可以：
+
+1. 返回 `status: "blocked"` 告知调用失败
+2. 生成报告供事后审计
+3. 通过日志告警通知用户
+
+---
+
+## 安装方法
+
+### 方法 1: 本地链接
+
+```bash
+# 1. 复制 Skill 到 OpenClaw 工作目录
+cp -r callisto-skill ~/.openclaw/workspace/skills/callisto
+
+# 2. 设置环境变量
+export CALLISTO_ENABLED=1
+export CALLISTO_THRESHOLD=3
+
+# 3. 验证
+openclaw skills list
+```
+
+### 方法 2: npm 安装（发布后）
+
+```bash
+npm install openclaw-skill-callisto
+```
+
+---
+
+## 使用示例
+
+### 在 OpenClaw 中调用
+
+```
+/ask 调用 callisto_scan 检测当前会话安全风险
+```
+
+### 直接使用工具
+
+```bash
+# 扫描风险
+openclaw callisto_scan
+
+# 查看状态
+openclaw callisto_status
+
+# 手动熔断
+openclaw callisto_block --reason "高风险操作"
+```
+
+---
+
+## 限制说明
+
+### 无法做到的
+
+| 功能 | 原因 |
+|------|------|
+| 实时工具调用前阻断 | OpenClaw 工具在沙箱执行，Skill 无法拦截 |
+| 熔断 OpenClaw 进程 | 外部进程，无法直接控制 |
+
+### 可以做到的
+
+| 功能 | 实现方式 |
+|------|---------|
+| 风险检测 | 分析会话日志，返回告警列表 |
+| 熔断标记 | 返回 `status: "blocked"` |
+| 报告生成 | 生成文本报告 |
+| 告警通知 | 通过 OpenClaw 消息通道发送 |
+
+---
+
+## 完整实时阻断方案
+
+如需**真正的实时阻断**，需要：
+
+1. **OpenClaw 官方支持** - 在工具执行层添加拦截钩子
+2. **或自定义 Agent 框架** - 使用 `integration_examples/agent_with_callisto.py` 方案
+
+当前 Skill 方案适用于：
+- ✅ 事后审计
+- ✅ 风险告警
+- ✅ 报告生成
+- ❌ 实时阻断
+
+---
+
+## 故障排除
+
+### 问题 1: Skill 未找到
+
+```bash
+# 检查 Skill 目录
+ls ~/.openclaw/workspace/skills/callisto
+
+# 重新加载 Skills
+openclaw skills reload
+```
+
+### 问题 2: Python 调用失败
+
+```bash
+# 检查 Python
+python3 --version
+
+# 检查 CALLISTO 路径
+export CALLISTO_PATH=/path/to/callisto
+export PYTHONPATH=$CALLISTO_PATH
+```
+
+### 问题 3: 检测无响应
+
+```bash
+# 启用调试日志
+export CALLISTO_DEBUG=1
+openclaw logs --skill callisto
+```
+
+---
+
+## 架构图
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      OpenClaw Gateway                       │
+│                                                             │
+│  ┌─────────────┐     ┌──────────────┐     ┌─────────────┐ │
+│  │   LLM Core  │ ──► │ Skill Router │ ──► │callisto-skill│ │
+│  └─────────────┘     └──────────────┘     └──────┬──────┘ │
+│                                                   │         │
+│                     ┌─────────────────────────────┤         │
+│                     │                             │         │
+│               ┌─────▼──────┐              ┌──────▼──────┐  │
+│               │ index.js   │              │  Python     │  │
+│               │ (Node.js)  │ ────────────► │  Backend    │  │
+│               └────────────┘   spawn()    │ callisto_   │  │
+│                                            │   agent.py  │  │
+│                                            └─────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 后续改进
+
+1. **Webhook 通知** - 风险告警推送到外部服务
+2. **仪表盘集成** - 在 OpenClaw Canvas 中显示安全状态
+3. **自动响应** - 达到阈值自动发送告警消息
+
+---
+
+**更新时间**: 2026-04-22

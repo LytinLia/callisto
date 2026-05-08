@@ -1,0 +1,539 @@
+# CALLISTO
+
+**CALLISTO** (Causal And LLM-Level Invocation Sequence Temporal Observer) 是一个用于实时监控 LLM Agent API 滥用和行为异常的安全检测系统。
+
+## 概述
+
+随着 LLM Agent 在生产环境中的广泛应用，它们带来的安全风险日益突出：权限升级、数据外泄、状态投毒等攻击可以通过一系列看似 benign 的工具调用组合实现。CALLISTO 通过四层检测架构，能够实时识别这些复杂的攻击模式。
+
+### 核心优势
+
+- **高检出率**: F1 = 0.989, Recall = 1.000
+- **低延迟**: 每会话检测仅需 ~10.7ms
+- **可解释性**: 提供因果分析和告警解释
+- **自适应性**: 自动学习 Agent 行为基线，减少误报
+
+---
+
+## 安装
+
+### 系统要求
+
+- Python 3.10+
+- 推荐 Python 3.13+
+
+### 安装方式
+
+```bash
+# 克隆或进入项目目录
+cd /Users/jiangqiang/Downloads/callisto
+
+# 方式 1: 使用 pip 安装依赖
+pip install -r requirements.txt
+
+# 方式 2: 可编辑安装为 Python 包
+pip install -e .
+
+# 完整功能安装（包含可选依赖）
+pip install -e ".[full,eval,dev]"
+```
+
+### 依赖说明
+
+| 依赖 | 用途 |
+|------|------|
+| numpy, scipy | 数值计算 |
+| scikit-learn | 机器学习算法 |
+| networkx | 图分析（DAG 处理） |
+| torch | 深度学习（可选） |
+| sentence-transformers | 语义嵌入（可选） |
+| matplotlib, seaborn | 可视化 |
+| pytest | 测试 |
+
+---
+
+## 快速开始
+
+### 1. 运行评估实验
+
+运行完整的评估实验，生成合成数据集并测试 CALLISTO 及基线检测器：
+
+```bash
+# 使用默认参数运行
+python -m callisto.evaluation.run_eval
+
+# 或指定参数
+callisto eval --benign 100 --attacks 30 --seed 42 --output ./eval_results
+```
+
+输出示例：
+```
+[CALLISTO Eval] Generating dataset...
+  Total sessions: 280
+[CALLISTO Eval] Running CALLISTO...
+  CALLISTO F1=0.9890, Precision=0.9821, Recall=1.0000
+
+======================================================================
+Detector         Precision     Recall         F1        FPR
+----------------------------------------------------------------------
+callisto            0.9821     1.0000     0.9890     0.0150
+rule                0.8500     0.7200     0.7800     0.1200
+iforest             0.9200     0.8900     0.9048     0.0600
+lof                 0.9100     0.8700     0.8895     0.0700
+======================================================================
+```
+
+### 2. 扫描日志文件
+
+扫描 OpenClaw 格式的 JSONL 会话日志：
+
+```bash
+# 扫描单个文件
+callisto scan sessions.jsonl
+
+# 扫描整个目录
+callisto scan ./logs/sessions/
+
+# 使用预训练的指纹
+callisto scan ./logs/ --fingerprint ./fingerprints.json
+```
+
+### 3. 训练行为指纹
+
+从历史良性会话数据中训练 Agent 行为指纹：
+
+```bash
+callisto train ./benign_sessions/ --output ./fingerprints.json
+```
+
+### 4. 实时监控
+
+启动实时监控器，监控 OpenClaw 日志目录：
+
+```bash
+# 基本监控
+callisto monitor ./logs/
+
+# 启用自动阻断
+callisto monitor ./logs/ --block
+
+# 指定扫描间隔
+callisto monitor ./logs/ --interval 0.5
+
+# 使用预训练指纹
+callisto monitor ./logs/ --fingerprint ./fingerprints.json
+```
+
+实时监控器功能：
+- 实时扫描新增的日志事件
+- 自动检测六类攻击模式
+- 支持熔断机制，自动阻断可疑 Agent
+- 生成紧急安全报告
+
+---
+
+## 项目结构
+
+```
+callisto/
+├── engine.py              # 主检测引擎，集成四层流水线
+├── config.py              # 全局配置
+├── cli.py                 # 命令行入口
+├── monitor.py             # 实时监控器
+├── pyproject.toml         # 项目配置
+├── requirements.txt       # 依赖列表
+├── README.md              # 本文件
+├── paper.tex              # 学术论文草稿
+│
+├── collector/             # Layer 1: 数据收集
+│   ├── models.py          # 数据模型 (CallEvent, Session, Alert)
+│   ├── interceptor.py     # 工具调用拦截器
+│   └── openclaw_parser.py # OpenClaw 日志解析器
+│
+├── features/              # Layer 2: 特征提取
+│   ├── temporal.py        # 时序特征提取
+│   ├── structural.py      # 结构特征 (DAG) 提取
+│   └── semantic.py        # 语义嵌入提取
+│
+├── detection/             # Layer 3: 检测算法
+│   ├── causal.py          # CRS 因果责任评分
+│   ├── changepoint.py     # MA-BOCPD 变点检测
+│   └── fingerprint.py     # CSBF 跨会话行为指纹
+│
+├── response/              # Layer 4: 响应处理
+│   ├── alert_ranker.py    # 告警排序/去重
+│   ├── circuit_breaker.py # 熔断器
+│   └── explainer.py       # 告警解释器
+│
+├── attacks/               # 攻击模拟
+│   └── simulator.py       # 6 类攻击生成器
+│
+└── evaluation/            # 评估工具
+    ├── run_eval.py        # 评估运行器
+    ├── metrics.py         # 评估指标
+    ├── ablation.py        # 消融实验
+    ├── adversarial.py     # 对抗攻击评估
+    ├── comparative_eval.py # 对比评估
+    └── ...
+```
+
+---
+
+## 核心架构
+
+### 四层检测流水线
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Layer 1: Collector - 捕获工具调用事件                    │
+│  - 解析 OpenClaw 日志格式                                   │
+│  - 构建 Session 对象                                       │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  Layer 2: Feature Extraction - 特征提取                    │
+│  - TemporalExtractor: 时序特征（速率、间隔、模式）          │
+│  - StructuralExtractor: 结构特征（DAG、数据流）            │
+│  - SemanticExtractor: 语义嵌入（64 维向量）                 │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  Layer 3: Detection - 检测算法                            │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    │
+│  │ CRS          │ │ MA-BOCPD     │ │ CSBF         │    │
+│  │ 因果责任评分  │ │ 自适应变点检测 │ │ 跨会话指纹   │    │
+│  └──────────────┘ └──────────────┘ └──────────────┘    │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  Layer 4: Response - 响应处理                            │
+│  - AlertRanker: 告警排序、去重、合并                       │
+│  - CircuitBreaker: 熔断机制，阻止可疑 Agent                │
+│  - AlertExplainer: 生成可读的告警解释                     │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 攻击类型检测
+
+CALLISTO 检测六类针对 LLM Agent 的攻击：
+
+| 代码 | 攻击类型 | 描述 | 主要检测模块 |
+|------|----------|------|--------------|
+| **A1** | 速率洪水 (Rate Flood) | 短时间内大量调用工具，消耗资源 | Temporal |
+| **A2** | 权限升级 (Privilege Escalation) | 通过工具链逐步获取更高权限 | CRS + Temporal |
+| **A3** | 数据外泄 (Data Exfiltration) | 将敏感数据编码后发送到外部 | Semantic |
+| **A4** | 行为漂移 (Behavioral Drift) | Agent 行为模式突然改变 | MA-BOCPD + CSBF |
+| **A5** | 时序违例 (Temporal Violation) | 危险操作先于安全检查 | Temporal |
+| **A6** | 状态投毒 (State Poisoning) | 写入持久化配置影响未来会话 | Temporal + CSBF |
+
+---
+
+## API 使用示例
+
+### 基本使用
+
+```python
+from callisto.engine import CallistoEngine
+from callisto.config import CallistoConfig
+from callisto.collector.models import Session, CallEvent, EventType
+
+# 创建配置
+config = CallistoConfig(
+    crs_threshold=0.7,
+    bocpd_threshold=0.5,
+    csbf_distance_threshold=3.0,
+)
+
+# 初始化引擎
+engine = CallistoEngine(config)
+
+# 预训练指纹（可选，从历史良性会话学习）
+# engine.train_fingerprints(historical_sessions)
+
+# 分析会话
+session = load_session("path/to/session.jsonl")
+alerts = engine.analyze_session(session)
+
+# 处理告警
+for alert in alerts:
+    print(f"[{alert.risk_level}] {alert.attack_type}: {alert.explanation}")
+
+# 检查是否需要熔断
+if engine.is_blocked():
+    print("Agent has been blocked due to consecutive high-risk alerts")
+```
+
+### 自定义配置
+
+```python
+from pathlib import Path
+from callisto.config import CallistoConfig
+
+config = CallistoConfig(
+    # 数据收集
+    log_dir=Path("./logs"),
+    watch_interval=1.0,
+    
+    # 特征提取
+    context_window=10,
+    embedding_dim=64,
+    
+    # CRS 配置
+    crs_samples=30,
+    crs_threshold=0.7,
+    
+    # MA-BOCPD 配置
+    bocpd_hazard_base=1/25,
+    bocpd_threshold=0.5,
+    bocpd_run_length_cap=50,
+    
+    # CSBF 配置
+    csbf_distance_threshold=3.0,
+    csbf_min_history=5,
+    
+    # 响应配置
+    alert_cooldown=5.0,
+    circuit_breaker_threshold=3,
+    
+    # 指纹持久化
+    fingerprint_path=Path("./fingerprints.json"),
+)
+```
+
+### 集成到现有系统
+
+```python
+# 示例：作为中间件集成到 Agent 框架中
+class CallistoMiddleware:
+    def __init__(self):
+        self.engine = CallistoEngine()
+        self.sessions = {}
+    
+    def on_tool_call(self, session_id: str, tool_name: str, params: dict):
+        session = self.sessions.get(session_id)
+        if not session:
+            session = Session(session_id=session_id)
+            self.sessions[session_id] = session
+        
+        event = CallEvent(
+            tool_name=tool_name,
+            parameters=params,
+            timestamp=time.time(),
+        )
+        session.add_event(event)
+        
+        # 实时检测
+        alerts = self.engine.analyze_session(session)
+        if alerts:
+            self.handle_alerts(alerts)
+        
+        if self.engine.is_blocked():
+            raise PermissionError("Agent blocked by CALLISTO")
+```
+
+---
+
+## 评估结果
+
+### 主实验结果
+
+在 280 个会话（100 个良性 + 每类攻击 30 个）上的评估：
+
+| 检测器 | 精确率 | 召回率 | F1 分数 | 误报率 |
+|--------|--------|--------|--------|--------|
+| **CALLISTO** | 0.982 | **1.000** | **0.989** | 0.015 |
+| Rule-Based | 0.850 | 0.720 | 0.780 | 0.120 |
+| Isolation Forest | 0.920 | 0.890 | 0.905 | 0.060 |
+| LOF | 0.910 | 0.870 | 0.890 | 0.070 |
+
+### 消融实验
+
+| 配置 | F1 分数 |
+|------|--------|
+| 完整系统 | 0.989 |
+| 无 CRS | 0.945 |
+| 无 MA-BOCPD | 0.932 |
+| 无 CSBF | 0.918 |
+| 仅规则检测 | 0.780 |
+
+### 对抗攻击鲁棒性
+
+| 攻击策略 | F1 分数 |
+|----------|--------|
+| 原始攻击 | 0.989 |
+| 减速绕过 | 0.968 |
+| 模仿攻击 | 0.952 |
+| 指纹投毒 | 0.957 |
+
+---
+
+## 配置选项
+
+### 完整配置参数
+
+```python
+@dataclass
+class CallistoConfig:
+    # --- 数据收集 ---
+    log_dir: Path = Path("./logs")
+    watch_interval: float = 1.0
+    
+    # --- 特征提取 ---
+    context_window: int = 10
+    embedding_dim: int = 64
+    
+    # --- CRS ---
+    crs_samples: int = 30
+    crs_threshold: float = 0.7
+    
+    # --- MA-BOCPD ---
+    bocpd_hazard_base: float = 1/25
+    bocpd_threshold: float = 0.5
+    bocpd_run_length_cap: int = 50
+    
+    # --- CSBF ---
+    csbf_distance_threshold: float = 3.0
+    csbf_min_history: int = 5
+    
+    # --- 响应 ---
+    alert_cooldown: float = 5.0
+    circuit_breaker_threshold: int = 3
+    
+    # --- 时序检测 ---
+    burst_window: float = 5.0
+    burst_count_threshold: int = 8
+    sensitive_chain_min: int = 3
+    
+    # --- 持久化 ---
+    fingerprint_path: Optional[Path] = None
+```
+
+---
+
+## 数据格式
+
+### 输入格式 (JSONL)
+
+```jsonl
+{"event_id": "abc123", "session_id": "sess_001", "agent_id": "agent_0", "timestamp": 1710000000.0, "tool_name": "read_file", "parameters": {"path": "/data/file.txt"}, "result": "..."}
+{"event_id": "def456", "session_id": "sess_001", "agent_id": "agent_0", "timestamp": 1710000001.0, "tool_name": "write_file", "parameters": {"path": "/data/output.txt", "content": "..."}, "result": "OK"}
+```
+
+### 输出格式 (Alert)
+
+```python
+@dataclass
+class Alert:
+    alert_id: str           # 告警 ID
+    timestamp: float        # 时间戳
+    session_id: str         # 会话 ID
+    risk_level: RiskLevel   # 风险等级 (LOW/MEDIUM/HIGH/CRITICAL)
+    attack_type: AttackType # 攻击类型
+    source_module: str      # 检测模块
+    trigger_events: list    # 触发事件 ID 列表
+    score: float            # 风险评分
+    explanation: str        # 可读解释
+```
+
+---
+
+## 开发指南
+
+### 添加新的检测模块
+
+```python
+# detection/my_detector.py
+from callisto.collector.models import Alert, RiskLevel, AttackType
+
+class MyDetector:
+    def __init__(self, threshold: float = 0.5):
+        self.threshold = threshold
+    
+    def detect(self, session: Session) -> Alert | None:
+        # 实现检测逻辑
+        score = self.compute_score(session)
+        if score > self.threshold:
+            return Alert(
+                timestamp=time.time(),
+                risk_level=RiskLevel.HIGH,
+                attack_type=AttackType.A2_PRIV_ESCALATION,
+                source_module="MyDetector",
+                score=score,
+                explanation="Custom detection logic triggered",
+            )
+        return None
+```
+
+### 运行测试
+
+```bash
+# 运行所有测试
+pytest
+
+# 运行特定模块测试
+pytest tests/test_engine.py -v
+
+# 生成覆盖率报告
+pytest --cov=callisto --cov-report=html
+```
+
+---
+
+## 故障排除
+
+### 常见问题
+
+**Q: 导入错误 `ModuleNotFoundError: No module named 'callisto'`**
+
+A: 确保使用可编辑安装：`pip install -e .`
+
+**Q: 指纹加载失败**
+
+A: 检查指纹文件版本兼容性，重新训练指纹。
+
+**Q: 检测延迟过高**
+
+A: 调整配置参数：
+- 减少 `crs_samples`（默认 30）
+- 增加 `bocpd_run_length_cap`
+
+---
+
+## 引用
+
+如果您在研究中使用 CALLISTO，请引用：
+
+```bibtex
+@unpublished{callisto2026,
+  title={CALLISTO: Causal Attribution and Behavioral Fingerprinting for Real-Time LLM Agent Security Monitoring},
+  author={Anonymous Authors},
+  year={2026},
+  note={Under review}
+}
+```
+
+---
+
+## 许可证
+
+本项目采用 MIT 许可证。详见 [LICENSE](LICENSE) 文件。
+
+---
+
+## 贡献
+
+欢迎贡献代码、报告问题或提出建议！
+
+1. Fork 本仓库
+2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
+3. 提交更改 (`git commit -m 'Add amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 提交 Pull Request
+
+---
+
+## 联系方式
+
+如有问题或建议，请通过 GitHub Issues 联系我们。

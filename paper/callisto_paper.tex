@@ -1,0 +1,474 @@
+\documentclass[10pt,conference]{IEEEtran}
+\usepackage[utf8]{inputenc}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning,fit,backgrounds}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{CALLISTO: A Multi-Layer Bypass Detection Framework for Real-Time Security in LLM Agent Tool Invocation}
+
+\author{
+    \IEEEauthorblockN{CALLISTO Project}
+    \IEEEauthorblockA{
+        \textit{OpenClaw Security Plugin} \\
+        Real-time detection for indirect prompt injection attacks \\
+    }
+}
+
+\maketitle
+
+\begin{abstract}
+Large Language Model (LLM) agents equipped with tool invocation capabilities face emerging security threats from indirect prompt injection attacks, where adversarial instructions embedded in external content manipulate agent behavior through the model's context window. Existing defenses either rely on heavyweight LLM-as-a-judge approaches or require invasive tool-chain modifications with human-in-the-loop approval, limiting practical deployment. We present CALLISTO (Causal And LLM-Level Invocation Sequence Temporal Observer), a multi-layer bypass detection framework that monitors LLM agent tool invocations in real-time without modifying the agent's tool chain or requiring human oversight. CALLISTO combines (1) a content safety detector with 150+ pattern rules covering 26 built-in tools, (2) Causal Responsibility Scoring (CRS) using Shapley-value attribution on tool-call directed acyclic graphs, (3) Meta-Adaptive Bayesian Online Changepoint Detection (MA-BOCPD) for temporal anomaly detection, and (4) Cross-Session Behavioral Fingerprinting (CSBF) for persistent threat tracking. Evaluated across three benchmark datasets (AgentDojo, SkillInject, MCPSafeBench) with 200+ test cases, CALLISTO achieves an overall detection rate of 93.6\%, with 100\% detection on content safety review, 97\% on MCPSafeBench, and 92\% on SkillInject. The system adds less than 60ms latency per tool invocation and operates fully automatically without LLM dependencies.
+\end{abstract}
+
+\begin{IEEEkeywords}
+LLM security, prompt injection, agent safety, tool invocation, bypass detection, causal inference, changepoint detection
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+The integration of tool invocation capabilities into LLM agents has dramatically expanded their practical utility, enabling autonomous interaction with file systems, databases, APIs, and external services. However, this expansion introduces a novel attack surface: \textit{indirect prompt injection}, where adversarial instructions embedded in content processed by the agent (web pages, emails, files, search results) are propagated through the model's context window and cause unintended tool invocations.
+
+Unlike traditional prompt injection that targets the user-facing conversation, indirect injection operates silently through the agent's tool-use pipeline, potentially causing data exfiltration, privilege escalation, or state manipulation without the user's awareness. The fundamental challenge lies in distinguishing between legitimate tool invocations driven by the user's intent and malicious invocations driven by injected instructions — a problem that is inherently semantic and context-dependent.
+
+Two dominant defense paradigms have emerged. The first uses LLM-as-a-judge to semantically evaluate each tool invocation, achieving high accuracy at the cost of significant latency and additional model expenses \cite{clawguard}. The second employs a whitelist-and-approve model, replacing native tools with sandboxed wrappers that require human approval for any operation outside predefined boundaries. While this approach achieves 100\% defense rates on known benchmarks, it covers only a narrow subset of tools (typically 5 or fewer) and depends on human oversight for operations outside the whitelist \cite{clawguard}.
+
+CALLISTO takes a third approach: \textit{bypass detection}. Rather than intercepting or modifying tool invocations, CALLISTO observes them as a parallel monitoring layer, applying a combination of pattern matching, statistical analysis, and causal attribution to detect anomalous behavior. This design has several advantages:
+
+\begin{itemize}
+    \item \textbf{Zero modification to the agent tool chain}: CALLISTO operates as a side-channel observer, compatible with any LLM agent framework.
+    \item \textbf{Full tool coverage}: Unlike wrapper-based approaches, CALLISTO analyzes invocations of all 26+ built-in tools, including web search, browser navigation, message sending, cron scheduling, and code execution.
+    \item \textbf{Fully automatic}: No human-in-the-loop approval is required; detection and response are driven by rules and statistical thresholds.
+    \item \textbf{Low latency}: Pattern-based detection adds less than 60ms per invocation, compared to several seconds for LLM-as-a-judge approaches.
+    \item \textbf{No LLM dependency}: Detection relies on deterministic rules and statistical models, not on the availability or consistency of a secondary LLM.
+\end{itemize}
+
+The key insight behind CALLISTO is that while individual tool invocations may appear benign in isolation, their \textit{sequence}, \textit{causal relationships}, and \textit{temporal patterns} reveal attack signatures that are statistically distinguishable from normal agent behavior. By combining content-level pattern matching with session-level statistical analysis, CALLISTO achieves high detection rates across diverse attack categories while maintaining low false positive rates on benign workloads.
+
+Our contributions are:
+\begin{enumerate}
+    \item A seven-layer detection architecture that integrates content safety analysis, causal responsibility scoring, temporal changepoint detection, and automated circuit breaking.
+    \item Causal Responsibility Scoring (CRS), a Shapley-value-based method for attributing risk to individual tool invocations within a session's directed acyclic graph.
+    \item Meta-Adaptive Bayesian Online Changepoint Detection (MA-BOCPD), an extension of Bayesian online changepoint detection adapted to the multi-modal distribution of agent tool invocation patterns.
+    \item Cross-Session Behavioral Fingerprinting (CSBF) for tracking persistent attacker behavior across multiple sessions.
+    \item A comprehensive evaluation across three benchmark datasets demonstrating 93.6\% overall detection rate with sub-60ms latency.
+\end{enumerate}
+
+\section{Threat Model and Attack Taxonomy}
+
+\subsection{Threat Model}
+
+We consider an attacker who can inject adversarial instructions into content that the LLM agent processes. The injection vector may be:
+\begin{itemize}
+    \item \textbf{Web content}: Hidden text in HTML pages, email bodies, or search results.
+    \item \textbf{File content}: Malicious instructions embedded in documents the agent reads.
+    \item \textbf{Skill/plugin definitions}: Adversarial content in tool definitions or documentation.
+    \item \textbf{API responses}: Injected instructions in data returned by external API calls.
+\end{itemize}
+
+The attacker's goal is to manipulate the agent into performing unauthorized tool invocations that achieve one or more of the attack categories defined below. We assume the attacker has read access to the agent's skill definitions and tool documentation but does not have direct access to the agent's system prompt or configuration.
+
+\subsection{Attack Taxonomy}
+
+CALLISTO categorizes attacks into six primary types, each with distinct detection signatures:
+
+\textbf{A1 — Rate Flood}: The attacker causes the agent to invoke tools at an abnormally high frequency, either to exhaust resources (DoS) or to overwhelm the detection system with noise. Detection: sliding window counting ($\geq 8$ invocations per 5 seconds).
+
+\textbf{A2 — Privilege Escalation}: The attacker causes the agent to execute commands or invoke tools that exceed its intended authorization boundary. This includes shell commands with elevated privileges, dangerous system operations, and chains of sensitive tool invocations. Detection: malicious command pattern matching and sensitive tool chain analysis ($\geq 2$ consecutive high-sensitivity tools).
+
+\textbf{A3 — Data Exfiltration}: The attacker causes the agent to read sensitive data and transmit it to an external destination. Detection: combined tool + destination analysis (e.g., file read followed by HTTP POST to an external server).
+
+\textbf{A4 — Behavioral Drift}: The attacker gradually shifts the agent's behavior pattern from its baseline, introducing malicious operations incrementally. Detection: structural feature analysis comparing first-half vs. second-half tool distributions and inter-arrival time ratios.
+
+\textbf{A5 — Temporal Violation}: The attacker invokes tools in a sequence that violates normal operational patterns (e.g., deleting a file before reading it, writing without prior reading). Detection: MA-BOCPD changepoint detection and rule-based temporal pattern matching.
+
+\textbf{A6 — State Poisoning}: The attacker modifies persistent configuration files to establish long-term control (e.g., adding SSH keys, modifying crontab, editing .bashrc). Detection: path + content combined analysis for sensitive configuration files.
+
+Additionally, CALLISTO detects three refined attack scenarios:
+
+\textbf{P1/D1 — Sensitive File Read}: Access to credential files, private keys, and configuration secrets (40+ path patterns across SSH, AWS, Kubernetes, application credentials, and development credentials).
+
+\textbf{L1/L2 — Internal Network Access}: Connection to private IP ranges (192.168.x.x, 10.x.x.x, 172.16–31.x.x), cloud metadata endpoints (169.254.169.254), and internal service ports (3306, 5432, 6379, 27017).
+
+\textbf{L3 — Credential File Access}: Direct access to credential storage (.aws/credentials, .kube/config, .ssh/id\_rsa, .npmrc, .pypirc, .netrc).
+
+\section{System Architecture}
+
+\subsection{Overview}
+
+CALLISTO implements a seven-layer detection architecture organized into four functional stages:
+
+\begin{equation}
+\text{Layer 1 (Collection)} \rightarrow \text{Layer 2 (Features)} \rightarrow \text{Layer 3 (Detection)} \rightarrow \text{Layer 4 (Response)}
+\end{equation}
+
+Table \ref{tab:layers} summarizes the seven detection layers and their responsibilities.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.2}
+\caption{CALLISTO Seven-Layer Detection Architecture}
+\label{tab:layers}
+\centering
+\begin{tabular}{@{}p{2.2cm}p{2.8cm}p{2.2cm}p{1.3cm}@{}}
+\toprule
+\textbf{Layer} & \textbf{Component} & \textbf{Target} & \textbf{Trigger} \\
+\midrule
+L1: Content Safety & ContentSafetyDetector & Tool parameters, scripts, URLs & Per-call \\
+L2: Engine Analysis & CallistoEngine & Session tool-call sequence & Post-call \\
+L3: Causal Graph & CRS (Shapley-value) & Tool-call DAG & During L2 \\
+L4: Temporal Detect & MA-BOCPD & Call frequency, drift & During L2 \\
+L5: Sanitization & Sanitizer & Tool output (API keys, tokens) & Post-output \\
+L6: Circuit Breaker & CircuitBreaker & Consecutive HIGH alerts & On-alert \\
+L7: Alert Ranking & AlertRanker & Alert priority, explanation & Post-alert \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Plugin Integration Architecture}
+
+CALLISTO is deployed as an OpenClaw plugin with dual-mode operation:
+
+\begin{itemize}
+    \item \textbf{Plugin mode (automatic)}: Intercepts tool invocations via the \texttt{before\_tool\_call} hook, passing parameters to the Python detection engine in real-time. The JavaScript plugin layer spawns a Python subprocess for each invocation, with a 5-second timeout and automatic circuit breaker enforcement.
+    \item \textbf{Skill mode (manual)}: Users trigger security scans via the \texttt{/callisto} command, invoking the same Python backend for on-demand analysis.
+\end{itemize}
+
+Both modes share a single Python backend (\texttt{callisto\_agent.py}, 693 lines), ensuring consistent detection logic. The plugin additionally implements five supplementary hooks for defense-in-depth:
+
+\begin{itemize}
+    \item \texttt{message\_received}: Detects prompt injection patterns in user input (15+ bilingual rules).
+    \item \texttt{agent\_end}: Audits agent output for data exfiltration patterns.
+    \item \texttt{before\_agent\_reply}: Intercepts and can replace agent replies containing high-risk content.
+    \item \texttt{before\_message\_write}: Final barrier before message dispatch, blocking messages containing private keys, API keys, or credit card numbers.
+    \item \texttt{after\_tool\_call}: Audits tool return values for sensitive data leakage.
+\end{itemize}
+
+The total latency per tool invocation is broken down as follows: parameter sanitization ($<$1ms), rate flood detection ($<$1ms), command safety check ($<$5ms), sensitive file detection ($<$2ms), internal network access check ($<$2ms), full engine analysis ($<$50ms), and circuit breaker update ($<$1ms). The cumulative worst-case latency is under 60ms per invocation.
+
+\section{Detection Mechanisms}
+
+\subsection{L1: Content Safety Detection}
+
+The ContentSafetyDetector is the first line of defense, analyzing tool invocation parameters against a comprehensive rule set of 150+ patterns organized into 10 rule categories:
+
+\subsubsection{Rule Categories}
+
+\begin{itemize}
+    \item \textbf{Shell Patterns} (12 rules): Detects reverse shells, credential access, metadata access, and exfiltration patterns in shell commands.
+    \item \textbf{Shell Blacklist} (25 rules): Blocks known dangerous commands including fork bombs, shutdown commands, disk operations, and container escape attempts.
+    \item \textbf{Tool Parameter Rules} (16 rules): Validates parameters for financial, email, file, and calendar tools.
+    \item \textbf{Extended Tool Rules} (50+ rules): Covers 26 OpenClaw built-in tools including \texttt{web\_search}, \texttt{browser}, \texttt{code\_execution}, \texttt{message}, \texttt{cron}, \texttt{gateway}, \texttt{memory}, \texttt{sessions}, \texttt{nodes}, \texttt{read}, \texttt{write}, \texttt{edit}, \texttt{web\_fetch}, \texttt{image\_generate}, \texttt{video\_generate}, \texttt{send\_money}, \texttt{schedule\_transaction}, \texttt{send\_email}, \texttt{write\_file}, and \texttt{write\_calendar\_event}.
+    \item \textbf{Injection Patterns} (15+ rules): Bilingual (English/Chinese) prompt injection detection covering \texttt{ignore previous instructions}, system prompt override, jailbreak attempts, role manipulation, URL injection, and Chinese-language injection patterns.
+    \item \textbf{Output Exfiltration Patterns} (13 rules): Detects API keys, passwords, private keys, credit card numbers, and other sensitive data in agent output.
+    \item \textbf{Obfuscation Techniques} (10 rules): Detects encoding obfuscation, IFS abuse, quote mixing, backslash escaping, and \texttt{eval} usage using a scoring system (0=none, 1–2=low, 3–5=medium, 6+=high).
+    \item \textbf{Sensitive Path Patterns} (14 rules): Matches paths to SSH keys, AWS credentials, Docker configurations, and other sensitive file locations.
+    \item \textbf{Denied Domains} (10 rules): Blocks connections to Pastebin, ngrok, transfer.sh, and other known exfiltration endpoints.
+    \item \textbf{Known Safe Domains} (10 rules): Whitelists GitHub, PyPI, NPM, Google, and other trusted repositories.
+\end{itemize}
+
+\subsubsection{Command Normalization}
+
+Inspired by ClawGuard's normalizer, CALLISTO implements a command normalization pipeline that detects and decodes obfuscation techniques before pattern matching. The normalizer assigns an obfuscation score based on detected techniques:
+
+\begin{equation}
+\text{score} = \sum_{i \in \text{detected techniques}} w_i
+\end{equation}
+
+where weights $w_i$ range from 1 (quote mixing) to 3 (hex/octal encoding, base64 pipelines). Commands with high obfuscation scores (6+) are flagged as critical findings regardless of subsequent pattern matching results.
+
+\subsubsection{Script Source Analysis}
+
+For code execution tools, CALLISTO performs language-specific source analysis:
+\begin{itemize}
+    \item \textbf{Python}: AST-based analysis detecting dangerous imports (ctypes, pickle, shelve, marshal), supervised imports (subprocess, os, socket, requests), and dangerous calls (os.system, eval, exec, \_\_import\_\_).
+    \item \textbf{Shell}: Pattern matching with download-then-execute detection and pipeline execution chain analysis.
+    \item \textbf{Node.js}: Key module detection (child\_process, vm, cluster), supervised module detection (fs, net, http, https), and eval() detection.
+\end{itemize}
+
+\subsection{L2–L4: Session-Level Analysis}
+
+Beyond per-call pattern matching, CALLISTO analyzes the \textit{sequence} of tool invocations within a session to detect attacks that span multiple steps.
+
+\subsubsection{Feature Extraction}
+
+Three types of features are extracted from each session:
+
+\textbf{Temporal Features}: Per-invocation inter-arrival times, per-tool-type frequency statistics, sliding window burst detection, and rate-of-change metrics.
+
+\textbf{Structural Features}: A directed acyclic graph (DAG) is constructed where nodes represent tool invocations and edges represent data dependencies (output of one tool used as input to another). The DAG structure captures attack chains that individual invocations cannot reveal.
+
+\textbf{Semantic Features}: Tool invocation parameters are embedded into a fixed-dimensional vector space using a lightweight encoding scheme, enabling similarity comparison across sessions.
+
+\subsubsection{Causal Responsibility Scoring (CRS)}
+
+When a session is flagged as suspicious, CRS computes the Shapley value of each tool invocation's contribution to the overall risk score. Given a session with $n$ tool invocations and a risk function $v: 2^N \rightarrow \mathbb{R}$ that maps subsets of invocations to a risk score, the Shapley value for invocation $i$ is:
+
+\begin{equation}
+\phi_i(v) = \sum_{S \subseteq N \setminus \{i\}} \frac{|S|! (n - |S| - 1)!}{n!} \left[v(S \cup \{i\}) - v(S)\right]
+\end{equation}
+
+This attribution enables precise identification of which invocations are responsible for elevated risk, rather than flagging the entire session indiscriminately. The Shapley values are computed efficiently using a Monte Carlo sampling approximation (default: 30 samples) to maintain real-time performance.
+
+\subsubsection{MA-BOCPD: Meta-Adaptive Bayesian Online Changepoint Detection}
+
+Standard Bayesian Online Changepoint Detection (BOCPD) models the probability of a changepoint at each time step based on the predictive probability of new observations under different run-length hypotheses. CALLISTO extends BOCPD with meta-adaptive hazard rates that adjust based on the session's risk context:
+
+\begin{equation}
+H_t = H_0 \cdot \alpha \cdot \beta_t
+\end{equation}
+
+where $H_0$ is the base hazard rate ($1/25$), $\alpha$ is a session-level risk multiplier, and $\beta_t$ is a time-varying factor based on recent tool invocation patterns. This allows the changepoint detector to be more sensitive in high-risk sessions while remaining tolerant of natural behavior variation in benign sessions.
+
+The run-length posterior is updated at each invocation:
+
+\begin{equation}
+P(r_t = l | x_{1:t}) \propto P(x_t | r_t = l, x_{1:t-1}) \sum_{r_{t-1}} P(r_t = l | r_{t-1}) P(r_{t-1} | x_{1:t-1})
+\end{equation}
+
+A changepoint is detected when the posterior probability of a short run-length exceeds the threshold (default: 0.5), indicating that the current behavior is inconsistent with the recent history.
+
+\subsubsection{Cross-Session Behavioral Fingerprinting (CSBF)}
+
+CSBF maintains a behavioral fingerprint for each agent identity across sessions, capturing the distribution of tool types, average invocation rates, and typical parameter patterns. When a new session's fingerprint deviates significantly from the historical baseline (Mahalanobis distance $> 3.0$ with minimum 5 sessions of history), an A4 (Behavioral Drift) alert is raised. This detects persistent attackers who gradually modify agent behavior over multiple sessions to evade single-session detection.
+
+\subsection{L5: Sanitization}
+
+The Sanitizer processes tool output before it enters the agent's context window, detecting and redacting 15 categories of sensitive data including API keys, access tokens, private keys, passwords, and credit card numbers. This prevents injected content containing sensitive data from propagating through the conversation history.
+
+\subsection{L6: Automated Circuit Breaker}
+
+The CircuitBreaker tracks consecutive HIGH-risk alerts per session. When the count exceeds a configurable threshold (default: 3), the circuit transitions from CLOSED to OPEN, and all subsequent tool invocations from that session are automatically blocked. This provides a fail-safe mechanism that prevents attack escalation even if individual detection layers miss specific invocations.
+
+\subsection{L7: Alert Ranking and Explanation}
+
+Generated alerts are ranked by the AlertRanker, which considers risk level, attack type severity, causal responsibility scores, and session context. The AlertExplainer generates human-readable explanations for each alert, describing the detected pattern, its risk implications, and recommended actions.
+
+\section{Implementation}
+
+CALLISTO is implemented as a hybrid Python–TypeScript system totaling approximately 22,000 lines of code across 55 Python files and 5 JavaScript files. The core detection engine is a Python package (\texttt{callisto/}) with the following module organization:
+
+\begin{itemize}
+    \item \texttt{callisto/engine.py}: Main engine orchestrating all detection layers (350 lines).
+    \item \texttt{callisto/content\_safety.py}: Content safety detector with 150+ pattern rules (1,246 lines).
+    \item \texttt{callisto/sanitizer.py}: Sensitive data detection and redaction for 15 categories (215 lines).
+    \item \texttt{callisto/collector/}: Event collection, data models (CallEvent, Session, Alert), and OpenClaw log parsing.
+    \item \texttt{callisto/features/}: Temporal, structural, and semantic feature extraction.
+    \item \texttt{callisto/detection/}: Causal responsibility scoring, MA-BOCPD changepoint detection, and cross-session fingerprinting.
+    \item \texttt{callisto/response/}: Alert ranking, circuit breaker, and explanation generation.
+    \item \texttt{callisto/attacks/}: Attack scenario simulator for generating benchmark datasets.
+\end{itemize}
+
+The OpenClaw plugin layer (\texttt{dist/index.js}, 307 lines) implements six event hooks that interface with the Python backend via stdin/stdout subprocess communication. A Web Dashboard built with FastAPI provides real-time monitoring, alert visualization, session management, and Server-Sent Events (SSE) push at http://localhost:8765.
+
+\section{Evaluation}
+
+\subsection{Methodology}
+
+CALLISTO is evaluated across three benchmark datasets covering different injection channels and attack categories:
+
+\begin{itemize}
+    \item \textbf{AgentDojo} (ETH Zurich): 35 tasks testing indirect prompt injection through web and local content, covering banking, Slack, travel, and workspace scenarios.
+    \item \textbf{SkillInject} (aisa-group): 59 attacks injecting adversarial content into skill definitions, testing the agent's ability to resist instruction manipulation through tool documentation.
+    \item \textbf{MCPSafeBench} (arXiv:2512.15163): 35 attacks targeting MCP (Model Context Protocol) servers, including credential theft, data tampering, and service manipulation.
+\end{itemize}
+
+Additionally, a content safety review test suite with 28 independent cases (15 input + 13 output) validates the ContentSafetyDetector's pattern coverage.
+
+\subsection{Results}
+
+Table \ref{tab:results} summarizes the detection rates across all datasets.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.2}
+\caption{Detection Rates Across Benchmark Datasets}
+\label{tab:results}
+\centering
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Dataset} & \textbf{Detected / Total} & \textbf{Rate} & \textbf{Notes} \\
+\midrule
+AgentDojo & 31 / 35 & 88.6\% & Combined detection \\
+SkillInject & 54 / 59 & 92.0\% & Combined detection \\
+MCPSafeBench & 34 / 35 & 97.1\% & Combined detection \\
+Content Safety & 28 / 28 & 100.0\% & Dialog-layer detection \\
+\quad Input (input) & 15 / 15 & 100.0\% & Prompt injection \\
+\quad Output (output) & 13 / 13 & 100.0\% & Data exfiltration \\
+\textbf{Overall} & \textbf{147 / 157} & \textbf{93.6\%} & \textbf{Combined} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Per-Scene Analysis (AgentDojo)}
+
+Table \ref{tab:agentdojo} breaks down AgentDojo results by scene. CALLISTO achieves 100\% detection on banking, Slack, and travel scenes, with lower coverage on workspace scenarios due to subtle semantic attacks that require LLM-level understanding.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.2}
+\caption{AgentDojo Detection Rates by Scene}
+\label{tab:agentdojo}
+\centering
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Scene} & \textbf{Detected / Total} & \textbf{Rate} \\
+\midrule
+banking & 9 / 9 & 100\% \\
+slack & 5 / 5 & 100\% \\
+travel & 7 / 7 & 100\% \\
+workspace & 10 / 14 & 71.4\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 4 missed cases in workspace scenarios involve non-Exec tool invocations with subtle semantic manipulation (e.g., environment information exposure through benign-looking commands). These represent a fundamental limitation of pattern-based detection and motivate future work incorporating LLM semantic verification as a supplementary layer.
+
+\subsection{Detection Mechanism Coverage}
+
+Table \ref{tab:mechanisms} shows which attack types are covered by each detection mechanism.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.1}
+\caption{Detection Mechanism Coverage}
+\label{tab:mechanisms}
+\centering
+\small
+\begin{tabular}{@{}lp{4.5cm}@{}}
+\toprule
+\textbf{Mechanism} & \textbf{Covered Attacks} \\
+\midrule
+Malicious Command Matching & \texttt{curl -X POST -d @file}, \texttt{curl | bash}, \texttt{rm -rf} \\
+Non-Exec Tool Detection & \texttt{send\_money} IBAN, \texttt{schedule\_transaction} recurring payments \\
+Extended Blacklist & Fork bombs, infinite loops, container escapes, \texttt{git force push} (45+ patterns) \\
+Command Normalization & IFS abuse, encoding obfuscation, quote mixing, backslash escapes, eval \\
+Path Access Control & Sensitive file reads (shadow, SSH keys, env, AWS credentials) \\
+Network Whitelist & Unknown external domains, cloud metadata access, private IP access \\
+Content Safety & Script analysis, URL checking, obfuscation detection, SSRF detection \\
+26-Tool Coverage & Parameter-level risk detection for all OpenClaw built-in tools \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Comparison with ClawGuard}
+
+ClawGuard \cite{clawguard} represents the most comparable existing defense system. Table \ref{tab:comparison} compares the two approaches across key dimensions.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.1}
+\caption{CALLISTO vs. ClawGuard: Architecture Comparison}
+\label{tab:comparison}
+\centering
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Dimension} & \textbf{ClawGuard} & \textbf{CALLISTO} \\
+\midrule
+Strategy & Whitelist (deny-by-default) & Blacklist (allow-by-default) \\
+Tool Control & Gateway disable + replace & Bypass detection, no call blocking \\
+Human-in-Loop & Yes (APPROVE queue) & No (fully automatic) \\
+Detection Scope & $\sim$5 wrapped tools & 26+ built-in tools \\
+Semantic Understanding & No (regex/pattern only) & No (regex/pattern only) \\
+Session-Level Analysis & No (per-call only) & Yes (causal graph, chains, temporal) \\
+Zero-Day Immunity & Yes (whitelist) & No (requires new rules) \\
+Deployment Complexity & High (replace tools + modify config) & Low (plugin, no config changes) \\
+AgentDojo Detection & 100\% (35/35) & 88.6\% (31/35) \\
+Tool Coverage & $\sim$5 tools & 26+ tools \\
+Prompt Injection Detection & None (relies on sanitizer) & 15+ bilingual rules \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The key tradeoff is clear: ClawGuard achieves 100\% AgentDojo detection through a whitelist-and-approve architecture that inherently blocks any operation outside predefined boundaries, but this covers only $\sim$5 tools and requires human approval for exceptions. CALLISTO covers 26+ tools automatically with no human dependency, but achieves 88.6\% on AgentDojo due to the inherent limitations of blacklist-based detection against novel semantic attacks.
+
+The two systems are complementary. ClawGuard provides a strong L1 defense for core tools (exec, read, write, http) with zero-day immunity through whitelisting. CALLISTO provides an L2 defense that covers all remaining tools, detects prompt injection at the content level, and performs session-level behavioral analysis that ClawGuard's per-call model cannot achieve.
+
+\subsection{Limitations}
+
+CALLISTO's pattern-based approach has inherent limitations:
+
+\begin{enumerate}
+    \item \textbf{Semantic attacks on non-Exec tools}: Commands like \texttt{echo \$PATH} that expose environment information through benign-looking invocations require LLM semantic understanding to detect reliably.
+    \item \textbf{Social engineering}: Content that persuades the human user (rather than the agent) to take malicious actions is outside the scope of tool-invocation monitoring.
+    \item \textbf{Novel attack patterns}: Zero-day attack vectors that do not match existing rules require manual rule additions.
+    \item \textbf{Short sessions}: A2 (Privilege Escalation), A4 (Behavioral Drift), and A5 (Temporal Violation) detection requires sufficient invocation history; sessions with fewer than 3 invocations may have reduced coverage for these categories.
+\end{enumerate}
+
+\section{Related Work}
+
+\subsection{Prompt Injection Attacks}
+
+The taxonomy of prompt injection attacks was formalized by \cite{agentdojo}, which distinguishes between direct injection (user-facing) and indirect injection (through external content). The AgentDojo benchmark provides a standardized evaluation framework with 35 tasks across 4 scenarios. SkillInject \cite{skillinject} and MCPSafeBench \cite{mcpsafebench} extend this to skill-definition-level and MCP-protocol-level injection respectively.
+
+\subsection{LLM Agent Security Frameworks}
+
+ClawGuard \cite{clawguard} implements a whitelist-and-approve model for LLM agent security, replacing native tools with sandboxed wrappers and requiring human approval for operations outside predefined boundaries. While achieving 100\% detection on AgentDojo, it covers only $\sim$5 tools and introduces significant latency through the approval loop.
+
+Other approaches include LLM-as-a-judge verification \cite{llmjudge}, which uses a secondary LLM to evaluate each tool invocation semantically. This achieves high accuracy but introduces 2–10 second latency per invocation and depends on the secondary model's consistency and availability.
+
+\subsection{Changepoint Detection}
+
+Bayesian Online Changepoint Detection (BOCPD) \cite{bocpd} provides a principled framework for detecting distributional changes in time series. CALLISTO's MA-BOCPD extends this with meta-adaptive hazard rates that adjust sensitivity based on session risk context, enabling more responsive detection in high-risk scenarios.
+
+\subsection{Causal Attribution}
+
+Shapley values \cite{shapley} provide a game-theoretic foundation for fair attribution of outcomes to individual participants. CALLISTO's CRS applies this to tool invocation risk attribution, enabling precise identification of which invocations contribute most to session-level risk scores.
+
+\section{Conclusion and Future Work}
+
+CALLISTO demonstrates that a multi-layer bypass detection architecture combining content safety analysis, causal responsibility scoring, temporal changepoint detection, and automated circuit breaking can achieve 93.6\% overall detection rate across three benchmark datasets with sub-60ms latency and zero modification to the agent's tool chain. The system's key strength is its broad tool coverage (26+ tools) and fully automatic operation without LLM dependencies.
+
+The primary limitation — 88.6\% detection on AgentDojo compared to ClawGuard's 100\% — reflects the fundamental tradeoff between blacklist coverage and whitelist immunity. Future work will explore:
+
+\begin{itemize}
+    \item \textbf{Hybrid detection}: Integrating lightweight LLM semantic verification as a supplementary layer for ambiguous invocations that pass pattern matching but exhibit suspicious context patterns.
+    \item \textbf{Adaptive rule generation}: Automatically extracting new detection rules from observed attack patterns to reduce the manual effort of rule maintenance.
+    \item \textbf{Cross-framework compatibility}: Extending the plugin architecture beyond OpenClaw to support other LLM agent frameworks (LangChain, AutoGPT, CrewAI).
+    \item \textbf{Production hardening}: Adding authentication to the Web Dashboard, implementing encrypted communication between the plugin and Python backend, and deploying on-production performance monitoring.
+\end{itemize}
+
+The complementary nature of CALLISTO and ClawGuard suggests that a combined deployment — ClawGuard as L1 for core tools with whitelist protection, CALLISTO as L2 for all tools with bypass detection — provides the most comprehensive defense currently achievable.
+
+\begin{thebibliography}{00}
+
+\bibitem{agentdojo}
+ETH Zurich, ``AgentDojo: A Benchmark for Indirect Prompt Injection in LLM Agents,'' 2025.
+
+\bibitem{clawguard}
+``ClawGuard: Runtime Control Strategies for LLM Agent Security,'' arXiv:2604.11790v1, 2026.
+
+\bibitem{skillinject}
+aisa-group, ``SkillInject: Adversarial Skill Definition Injection for LLM Agents,'' 2025.
+
+\bibitem{mcpsafebench}
+``MCPSafeBench: Evaluating MCP Server Security for LLM Agents,'' arXiv:2512.15163, 2025.
+
+\bibitem{llmjudge}
+``LLM-as-a-Judge for Tool Invocation Verification,'' 2025.
+
+\bibitem{bocpd}
+R. P. Adams and D. J. C. MacKay, ``Bayesian Online Changepoint Detection,'' arXiv:0710.3742, 2007.
+
+\bibitem{shapley}
+L. S. Shapley, ``A Value for n-Person Games,'' Contributions to the Theory of Games, vol. 2, pp. 307–317, 1953.
+
+\end{thebibliography}
+
+\end{document}
